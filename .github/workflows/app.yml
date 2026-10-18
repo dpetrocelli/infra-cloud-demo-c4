@@ -1,0 +1,103 @@
+# Pipeline 2: the APP. test -> build + push -> deploy onto the VM.
+#   - pull request touching app/ -> test and build only (nothing is published)
+#   - push to main touching app/ -> test, push app:<sha>, deploy it to the VM
+# It runs as its own service account (app-deployer): it can push images and
+# SSH into the VM (OS Login, through IAP), but cannot create or delete VMs.
+#
+# Repository variables: GCP_PROJECT_ID, GCP_WORKLOAD_IDENTITY_PROVIDER,
+# GCP_APP_SERVICE_ACCOUNT, VM_NAME (default demo-c4-vm), GCP_ZONE
+# (default us-central1-a), AR_REPOSITORY (default infra-cloud-template).
+name: app
+
+on:
+  pull_request:
+    paths: ["app/**", ".github/workflows/app.yml"]
+  push:
+    branches: [main]
+    paths: ["app/**", ".github/workflows/app.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGION: us-central1
+  ZONE: ${{ vars.GCP_ZONE || 'us-central1-a' }}
+  VM_NAME: ${{ vars.VM_NAME || 'demo-c4-vm' }}
+  IMAGE: us-central1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.AR_REPOSITORY || 'infra-cloud-template' }}/demo-c4:${{ github.sha }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: pytest (the same command as on the laptop)
+        working-directory: app
+        run: uv run --python 3.12 --with-requirements requirements.txt --with pytest --with httpx pytest -q
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # only this job and deploy may ask for an OIDC token
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker build
+        run: docker build --build-arg "APP_VERSION=${GITHUB_SHA::7}" -t "$IMAGE" ./app
+
+      - name: Smoke test (GET /healthz)
+        run: |
+          docker run -d --name smoke -p 8080:8080 "$IMAGE"
+          curl -sf --retry 20 --retry-delay 1 --retry-all-errors http://localhost:8080/healthz
+          docker rm -f smoke
+
+      # Pull requests stop here: tested and built, nothing published.
+      - id: auth
+        if: github.event_name != 'pull_request'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_APP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        if: github.event_name != 'pull_request'
+
+      - name: docker push
+        if: github.event_name != 'pull_request'
+        run: |
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker push "$IMAGE"
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_APP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # Exactly what you would type by hand on the VM: pull, remove the old
+      # container, run the new one with the same volume.
+      - name: docker pull + run on the VM (SSH through IAP)
+        run: |
+          gcloud compute ssh "$VM_NAME" --zone "$ZONE" --tunnel-through-iap --quiet --command "
+            sudo docker pull $IMAGE &&
+            (sudo docker rm -f app || true) &&
+            sudo docker run -d --name app --restart unless-stopped -p 8080:8080 -v app-data:/data $IMAGE"
+
+      - name: Check the new version answers
+        run: |
+          IP=$(gcloud compute instances describe "$VM_NAME" --zone "$ZONE" --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
+          curl -sf --retry 20 --retry-delay 2 --retry-all-errors "http://$IP:8080/" | tee /dev/stderr | grep -q "\"version\":\"${GITHUB_SHA::7}\""
+          echo "::notice::deployed ${GITHUB_SHA::7} at http://$IP:8080/"
