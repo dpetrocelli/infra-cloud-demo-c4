@@ -1,0 +1,6 @@
+infra/.terraform/
+infra/tfplan
+*.tfstate*
+app/data/
+__pycache__/
+.pytest_cache/

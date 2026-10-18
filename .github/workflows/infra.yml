@@ -1,0 +1,66 @@
+# Pipeline 1: the MACHINE. Creates/changes the VM with OpenTofu.
+#   - pull request touching infra/ -> plan only (read it in the log)
+#   - push to main touching infra/ -> plan + apply
+#   - Actions > infra > Run workflow -> plan + apply (to run it by hand)
+# It runs as its own service account (infra-deployer), which can manage VMs
+# and firewalls but cannot push images. Authentication: OIDC, no JSON key.
+#
+# Repository variables: GCP_PROJECT_ID, GCP_WORKLOAD_IDENTITY_PROVIDER,
+# GCP_INFRA_SERVICE_ACCOUNT.
+name: infra
+
+on:
+  pull_request:
+    paths: ["infra/**", ".github/workflows/infra.yml"]
+  push:
+    branches: [main]
+    paths: ["infra/**", ".github/workflows/infra.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never two applies at the same time on the same state.
+concurrency:
+  group: infra
+  cancel-in-progress: false
+
+jobs:
+  tofu:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra
+    env:
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_INFRA_SERVICE_ACCOUNT }}
+
+      - uses: opentofu/setup-opentofu@v1
+
+      - name: tofu init
+        run: tofu init -input=false -backend-config="bucket=${{ vars.GCP_PROJECT_ID }}-tfstate"
+
+      - name: tofu validate
+        run: tofu validate
+
+      - name: tofu plan
+        run: tofu plan -input=false -out=tfplan
+
+      # Applies exactly the plan above, and only from main (never from a PR).
+      - name: tofu apply
+        if: github.event_name != 'pull_request'
+        run: tofu apply -input=false tfplan
+
+      - name: Outputs
+        if: github.event_name != 'pull_request'
+        run: tofu output
