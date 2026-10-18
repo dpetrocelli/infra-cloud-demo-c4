@@ -1,12 +1,15 @@
 # Pipeline 2: the APP. test -> build + push -> deploy onto the VM.
 #   - pull request touching app/ -> test and build only (nothing is published)
 #   - push to main touching app/ -> test, push app:<sha>, deploy it to the VM
-# It runs as its own service account (app-deployer): it can push images and
-# SSH into the VM (OS Login, through IAP), but cannot create or delete VMs.
+# GCP access: its own service account (app-deployer) via OIDC, no JSON key.
+# It can push images and read the VM's IP; it cannot create or delete VMs.
+# VM access: plain SSH with the private key stored in the SSH_PRIVATE_KEY
+# secret (the matching .pub is what infra put on the VM).
 #
 # Repository variables: GCP_PROJECT_ID, GCP_WORKLOAD_IDENTITY_PROVIDER,
 # GCP_APP_SERVICE_ACCOUNT, VM_NAME (default demo-c4-vm), GCP_ZONE
-# (default us-central1-a), AR_REPOSITORY (default infra-cloud-template).
+# (default us-central1-a), SSH_USER (default deploy), AR_REPOSITORY
+# (default infra-cloud-template). Secret: SSH_PRIVATE_KEY.
 name: app
 
 on:
@@ -24,6 +27,7 @@ env:
   REGION: us-central1
   ZONE: ${{ vars.GCP_ZONE || 'us-central1-a' }}
   VM_NAME: ${{ vars.VM_NAME || 'demo-c4-vm' }}
+  SSH_USER: ${{ vars.SSH_USER || 'deploy' }}
   IMAGE: us-central1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.AR_REPOSITORY || 'infra-cloud-template' }}/demo-c4:${{ github.sha }}
 
 jobs:
@@ -87,17 +91,29 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
+      - name: VM public IP
+        run: |
+          IP=$(gcloud compute instances describe "$VM_NAME" --zone "$ZONE" --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
+          echo "IP=$IP" >> "$GITHUB_ENV"
+
+      - name: SSH key from the secret
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+
       # Exactly what you would type by hand on the VM: pull, remove the old
       # container, run the new one with the same volume.
-      - name: docker pull + run on the VM (SSH through IAP)
+      - name: docker pull + run on the VM (ssh)
         run: |
-          gcloud compute ssh "$VM_NAME" --zone "$ZONE" --tunnel-through-iap --quiet --command "
+          ssh -i ~/.ssh/deploy -o StrictHostKeyChecking=accept-new "$SSH_USER@$IP" "
             sudo docker pull $IMAGE &&
             (sudo docker rm -f app || true) &&
             sudo docker run -d --name app --restart unless-stopped -p 8080:8080 -v app-data:/data $IMAGE"
 
       - name: Check the new version answers
         run: |
-          IP=$(gcloud compute instances describe "$VM_NAME" --zone "$ZONE" --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
           curl -sf --retry 20 --retry-delay 2 --retry-all-errors "http://$IP:8080/" | tee /dev/stderr | grep -q "\"version\":\"${GITHUB_SHA::7}\""
           echo "::notice::deployed ${GITHUB_SHA::7} at http://$IP:8080/"

@@ -26,3 +26,20 @@ variable "machine_type" {
   type        = string
   default     = "e2-small"
 }
+
+variable "ssh_user" {
+  description = "Linux user created on the VM for SSH (ssh <this>@<ip>)."
+  type        = string
+  default     = "deploy"
+}
+
+variable "ssh_public_key" {
+  description = "Public key allowed to SSH in (contents of the .pub file). Public: not a secret."
+  type        = string
+}
+
+variable "ssh_source_ranges" {
+  description = "Who may reach port 22. 0.0.0.0/0 because GitHub runners have no fixed IP."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}

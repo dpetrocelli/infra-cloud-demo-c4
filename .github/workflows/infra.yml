@@ -6,7 +6,7 @@
 # and firewalls but cannot push images. Authentication: OIDC, no JSON key.
 #
 # Repository variables: GCP_PROJECT_ID, GCP_WORKLOAD_IDENTITY_PROVIDER,
-# GCP_INFRA_SERVICE_ACCOUNT.
+# GCP_INFRA_SERVICE_ACCOUNT, SSH_PUBLIC_KEY (the .pub: public, not a secret).
 name: infra
 
 on:
@@ -36,6 +36,7 @@ jobs:
         working-directory: infra
     env:
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
 

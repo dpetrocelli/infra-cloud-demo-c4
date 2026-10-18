@@ -33,7 +33,6 @@ resource "google_compute_instance" "app" {
   labels = {
     managed_by = "opentofu"
     clase      = "4"
-    demo       = "en-vivo"
   }
 
   boot_disk {
@@ -48,10 +47,13 @@ resource "google_compute_instance" "app" {
     access_config {} # public IP, to open the app from the browser
   }
 
-  # OS Login: SSH access is granted with IAM roles, not with keys in metadata.
-  # The app pipeline deploys over SSH as its own service account.
+  # Plain SSH with our own key: the guest agent creates the user from
+  # ssh-keys ("user:public key") and gives it sudo. OS Login off, and the
+  # project-wide keys blocked, so ONLY this key gets in.
   metadata = {
-    enable-oslogin = "TRUE"
+    enable-oslogin         = "FALSE"
+    block-project-ssh-keys = "TRUE"
+    ssh-keys               = "${var.ssh_user}:${trimspace(var.ssh_public_key)}"
   }
 
   # Docker only. No app here: the app arrives later, with `docker pull`.
@@ -76,12 +78,13 @@ resource "google_compute_firewall" "app" {
   }
 }
 
-# SSH only through IAP (Google's range), not from the internet.
-resource "google_compute_firewall" "ssh_iap" {
-  name          = "${var.vm_name}-allow-ssh-iap"
+# SSH from anywhere: GitHub runners have no fixed IP. Key-only login (Debian
+# images ship with password authentication off), so the key IS the lock.
+resource "google_compute_firewall" "ssh" {
+  name          = "${var.vm_name}-allow-ssh"
   network       = "default"
   target_tags   = ["demo-c4"]
-  source_ranges = ["35.235.240.0/20"]
+  source_ranges = var.ssh_source_ranges
 
   allow {
     protocol = "tcp"
