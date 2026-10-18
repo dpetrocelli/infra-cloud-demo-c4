@@ -33,6 +33,7 @@ resource "google_compute_instance" "app" {
   labels = {
     managed_by = "opentofu"
     clase      = "4"
+    demo       = "en-vivo"
   }
 
   boot_disk {
