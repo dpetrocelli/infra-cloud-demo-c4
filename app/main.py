@@ -36,7 +36,7 @@ def _read_items() -> list[dict]:
 @app.get("/")
 def root() -> dict:
     return {
-        "mensaje": "Hola desde la clase 4",
+        "mensaje": "Hola desde la clase 4, desplegado por el pipeline",
         "version": APP_VERSION,
         "host": socket.gethostname(),
     }
