@@ -11,3 +11,4 @@ fi
 
 # gcloud ships with Debian images on GCE; this adds the credential helper for root.
 gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+echo "hola"
